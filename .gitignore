@@ -52,7 +52,7 @@ secrets.json
 # Project-specific: PDF samples & outputs
 # ========================================
 # Raw input PDFs (optional to ignore – keep if needed)
-data/input/*.pdf
+# data/input/*.pdf
 
 # Parsed/processed output
 data/output/
