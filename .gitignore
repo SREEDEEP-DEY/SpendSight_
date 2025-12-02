@@ -1,0 +1,122 @@
+# ========================================
+# Python cache & bytecode
+# ========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# ========================================
+# Virtual environments (local/venv and conda)
+# ========================================
+.venv/
+venv/
+env/
+ENV/
+.conda/
+
+# ========================================
+# Jupyter Notebook checkpoints
+# ========================================
+.ipynb_checkpoints/
+
+# ========================================
+# VSCode, PyCharm, Editors
+# ========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ========================================
+# Logs & temp files
+# ========================================
+*.log
+*.tmp
+*.temp
+*.bak
+*.~lock*
+.DS_Store
+Thumbs.db
+
+# ========================================
+# Environment & Secrets
+# ========================================
+.env
+.env.local
+.env.test
+.env.production
+secrets.json
+
+# ========================================
+# Project-specific: PDF samples & outputs
+# ========================================
+# Raw input PDFs (optional to ignore – keep if needed)
+data/input/*.pdf
+
+# Parsed/processed output
+data/output/
+data/tmp/
+data/cache/
+parsed/
+exports/
+
+# ========================================
+# Database stuff
+# ========================================
+*.db
+*.sqlite
+*.sqlite3
+*.pgdata
+docker/postgres-data/
+
+# ========================================
+# Docker
+# ========================================
+docker-compose.override.yml
+docker-compose.local.yml
+*.pid
+*.seed
+*.tar
+**/.dockerignore
+
+# ========================================
+# Python packaging
+# ========================================
+*.egg
+*.egg-info/
+dist/
+build/
+
+# ========================================
+# Bytecode helpers or compiled extensions
+# ========================================
+*.so
+*.pyd
+
+# ========================================
+# Testing / coverage
+# ========================================
+.coverage
+htmlcov/
+pytest_cache/
+.tox/
+.nox/
+
+# ========================================
+# Model files (embeddings, checkpoints)
+# ========================================
+*.bin
+*.pt
+*.ckpt
+models/
+hf_cache/
+transformers_cache/
+
+# ========================================
+# Node stuff (only if frontend exists)
+# ========================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

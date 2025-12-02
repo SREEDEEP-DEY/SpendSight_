@@ -1,0 +1,29 @@
+# --- CORE PDF PROCESSING ---
+pdfplumber==0.10.3
+PyMuPDF==1.24.1         # optional, but useful for OCR fallback + text extraction
+
+# --- OCR (optional; comment out if not needed yet) ---
+pytesseract==0.3.10
+Pillow==10.3.0
+
+# --- DATABASE ---
+psycopg2-binary==2.9.9
+
+# --- DATA / ANALYTICS ---
+pandas==2.2.1
+numpy==1.26.4
+
+# --- MACHINE LEARNING (for Day 3-4 classification pipeline) ---
+transformers==4.39.0
+torch==2.2.1
+scikit-learn==1.4.1
+
+# --- UTILS ---
+python-dotenv==1.0.1
+tqdm==4.66.2
+
+# --- VISUALIZATION (optional) ---
+matplotlib==3.8.3
+
+# --- RAG (optional if you enable pgvector) ---
+pgvector==0.2.5          # Python adapter for pgvector extension
