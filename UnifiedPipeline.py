@@ -16,12 +16,16 @@ import psycopg2
 from psycopg2.extras import DictCursor
 from pathlib import Path
 from dotenv import load_dotenv
+import json
 
 # Import  regex engine
 from regex_engine.regex_classifier import classify_with_regex
 
 # Import  MiniLM engine
 from nlp.miniLM_classifier import MiniLMClassifier
+
+#Import llm engine
+from llm.llm_classifier import llm_clf
 
 # Import  & DB utilities
 from PipeLine import (
@@ -97,6 +101,61 @@ def apply_minilm_to_txn(conn, txn):
 
     conn.commit()
 
+# ---------------------------------------------------------------------
+# Fetch transactions needing LLM classification (Fallback)
+# ---------------------------------------------------------------------
+
+def fetch_transactions_for_llm(conn, statement_id):
+    """
+    Fetches transactions that are still PENDING or where the BERT classification 
+    confidence is below the LLM fallback threshold (Day 5 requirement).
+    """
+    # Threshold based on project requirements (e.g., MiniLM confidence < 0.85)
+    LLM_FALLBACK_THRESHOLD = 0.85
+    
+    query = """
+    SELECT txn_id, description_clean, description_raw, category, confidence
+    FROM transactions
+    WHERE statement_id = %s
+      AND (
+          category = 'PENDING' 
+          OR (classification_source = 'bert' AND confidence < %s) -- BERT low confidence
+      );
+    """
+    with conn.cursor(cursor_factory=DictCursor) as cur:
+        cur.execute(query, (statement_id, LLM_FALLBACK_THRESHOLD))
+        return cur.fetchall()   
+
+# ---------------------------------------------------------------------
+# Apply LLM classification to individual transaction
+# ---------------------------------------------------------------------
+
+def apply_llm_to_txn(conn, txn):
+    """
+    Sends the transaction to the LLM Fallback, updates the DB, and logs the result.
+    """
+    desc = txn["description_clean"] or txn["description_raw"] or ""
+    
+    # 1. Classify using LLM (uses the imported llm_clf object)
+    # The llm_clf.classify function now returns category, subcategory, confidence, meta
+    category, subcategory, confidence, meta = llm_clf.classify(desc)
+
+    # 2. Update DB
+    q = """
+    UPDATE transactions
+    SET category=%s, subcategory=%s, confidence=%s, classification_source='llm'
+    WHERE txn_id=%s
+    """
+    with conn.cursor() as cur:
+        cur.execute(q, (category, subcategory, confidence, txn["txn_id"]))
+
+    # 3. Log result
+    prediction = f"{category}.{subcategory}" if subcategory else category
+    # Assuming insert_classification_log is defined in PipeLine.py or imported
+    insert_classification_log(conn, txn["txn_id"], "llm", prediction, confidence, meta)
+
+    conn.commit()
+
 
 # ---------------------------------------------------------------------
 # PROCESS A PDF FILE COMPLETELY
@@ -159,7 +218,16 @@ def process_file(conn, filepath, user_id):
 
     print("[Pipeline] MiniLM classification complete.")
 
-    # Step 7: Update document status
+    # Step 7: Apply LLM Fallback (Day 5)
+    llm_pending = fetch_transactions_for_llm(conn, statement_id)
+    print(f"[Pipeline] LLM needs to process {len(llm_pending)} transactions...")
+
+    for txn in llm_pending:
+        apply_llm_to_txn(conn, txn)
+
+    print("[Pipeline] LLM Fallback classification complete.")
+    
+    # Step 8: Update document status
     update_document_status(conn, doc_id, "parsed")
 
     return len(txn_ids)
@@ -181,7 +249,6 @@ def main():
 
     conn.close()
     print(f"\n[Pipeline] Finished. Transactions processed: {total}")
-
 
 if __name__ == "__main__":
     main()
