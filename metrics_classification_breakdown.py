@@ -38,10 +38,11 @@ def main():
         by_source: List[Dict[str, Any]] = cur.fetchall()
 
         # =========================================================
-        # 3. WORKLOAD FUNNEL METRICS (NEW)
+        # 3. WORKLOAD FUNNEL METRICS
+        #    (How many items each stage ultimately owns)
         # =========================================================
         
-        # A. Transactions handled by Regex (Base for Funnel)
+        # A. Final transactions owned by Regex
         cur.execute("""
             SELECT COUNT(*) AS c
             FROM transactions
@@ -49,8 +50,7 @@ def main():
         """)
         regex_handled = cur.fetchone()["c"]
         
-        # B. Transactions passed to MiniLM/BERT (Those NOT definitively handled by Regex/Heuristics)
-        # Assuming MiniLM processes everything not successfully classified by the previous stage
+        # B. Final transactions owned by MiniLM/BERT
         cur.execute("""
             SELECT COUNT(*) AS c
             FROM transactions
@@ -58,7 +58,7 @@ def main():
         """)
         minilm_handled = cur.fetchone()["c"]
         
-        # C. Transactions passed to LLM (Those NOT definitively handled by Regex/Heuristics/MiniLM)
+        # C. Final transactions owned by LLM
         cur.execute("""
             SELECT COUNT(*) AS c
             FROM transactions
@@ -66,63 +66,108 @@ def main():
         """)
         llm_handled = cur.fetchone()["c"]
 
+        # D. Final transactions owned by Heuristics
+        cur.execute("""
+            SELECT COUNT(*) AS c
+            FROM transactions
+            WHERE classification_source = 'heuristic';
+        """)
+        heur_total = cur.fetchone()["c"]
+
         # =========================================================
-        # 4. TEMPORAL FAILURE ANALYSIS (NEW)
+        # 4. TEMPORAL FAILURE / PENDING ANALYSIS
         # =========================================================
         
-        # Transactions that are PENDING/UNCLEAR over time
         cur.execute("""
             SELECT 
                 DATE_TRUNC('month', created_at) AS month_start,
                 COUNT(*) AS pending_count
             FROM transactions
-            WHERE category = 'PENDING' OR category IS NULL OR category = 'UNCLEAR'
+            WHERE category = 'PENDING' 
+               OR category IS NULL 
+               OR category = 'UNCLEAR'
             GROUP BY month_start
             ORDER BY month_start;
         """)
         pending_by_month: List[Dict[str, Any]] = cur.fetchall()
 
-
         # =========================================================
-        # 5. INDIVIDUAL STAGE PERFORMANCE (Original Queries)
+        # 5. INDIVIDUAL STAGE PERFORMANCE
         # =========================================================
         
-        # Regex strong
+        # ---------------- Regex ----------------
         cur.execute("""
-            SELECT COUNT(*) AS c FROM transactions
-            WHERE classification_source = 'regex' AND confidence >= 0.8;
+            SELECT COUNT(*) AS c 
+            FROM transactions
+            WHERE classification_source = 'regex' 
+              AND confidence >= 0.8;
         """)
         regex_strong = cur.fetchone()["c"]
 
-        # Regex failed
+        # NOTE: after full pipeline, usually regex-owned rows are NOT PENDING,
+        # so this will typically be 0 (kept for completeness).
         cur.execute("""
-            SELECT COUNT(*) AS c FROM transactions
-            WHERE classification_source = 'regex' AND category = 'PENDING';
+            SELECT COUNT(*) AS c 
+            FROM transactions
+            WHERE classification_source = 'regex'
+              AND category = 'PENDING';
         """)
         regex_failed = cur.fetchone()["c"]
 
-        # Heuristics total, strong, failed (assuming 'heuristic' is a valid source)
-        cur.execute("SELECT COUNT(*) AS c FROM transactions WHERE classification_source = 'heuristic';")
-        heur_total = cur.fetchone()["c"]
-        cur.execute("SELECT COUNT(*) AS c FROM transactions WHERE classification_source = 'heuristic' AND confidence >= 0.6;")
+        # ---------------- Heuristics ----------------
+        # total already fetched as heur_total above
+
+        cur.execute("""
+            SELECT COUNT(*) AS c 
+            FROM transactions
+            WHERE classification_source = 'heuristic'
+              AND confidence >= 0.65;
+        """)
         heur_strong = cur.fetchone()["c"]
-        cur.execute("SELECT COUNT(*) AS c FROM transactions WHERE classification_source = 'heuristic' AND category = 'PENDING';")
+
+        cur.execute("""
+            SELECT COUNT(*) AS c 
+            FROM transactions
+            WHERE classification_source = 'heuristic'
+              AND category = 'PENDING';
+        """)
         heur_failed = cur.fetchone()["c"]
 
-        # MiniLM strong
-        cur.execute("SELECT COUNT(*) AS c FROM transactions WHERE classification_source = 'bert' AND confidence >= 0.6;")
+        # ---------------- MiniLM / BERT ----------------
+        cur.execute("""
+            SELECT COUNT(*) AS c 
+            FROM transactions
+            WHERE classification_source = 'bert'
+              AND confidence >= 0.7;
+        """)
         bert_strong = cur.fetchone()["c"]
 
-        # LLM strong and low confidence
-        cur.execute("SELECT COUNT(*) AS c FROM transactions WHERE classification_source = 'llm' AND confidence >= 0.9;")
+        # ---------------- LLM ----------------
+        cur.execute("""
+            SELECT COUNT(*) AS c 
+            FROM transactions
+            WHERE classification_source = 'llm'
+              AND confidence >= 0.9;
+        """)
         llm_strong = cur.fetchone()["c"]
-        cur.execute("SELECT COUNT(*) AS c FROM transactions WHERE classification_source = 'llm' AND confidence < 0.8;")
+
+        cur.execute("""
+            SELECT COUNT(*) AS c 
+            FROM transactions
+            WHERE classification_source = 'llm'
+              AND confidence < 0.8;
+        """)
         llm_low_conf = cur.fetchone()["c"]
 
-        # FINAL PENDING
-        cur.execute("SELECT COUNT(*) AS c FROM transactions WHERE category = 'PENDING' OR category IS NULL OR category = 'UNCLEAR';")
+        # ---------------- FINAL PENDING ----------------
+        cur.execute("""
+            SELECT COUNT(*) AS c 
+            FROM transactions
+            WHERE category = 'PENDING'
+               OR category IS NULL
+               OR category = 'UNCLEAR';
+        """)
         pending_all = cur.fetchone()["c"]
-
 
     conn.close()
 
@@ -135,27 +180,45 @@ def main():
     print("\n[ROUTING SUMMARY]:")
     for row in by_source:
         print(f"  {row['source']:>10}: {row['c']}")
-    
+
     # -----------------------------
-    print("\n[WORKLOAD FUNNEL]:")
-    print(f"  Handled by Regex/Heuristics: {regex_handled + heur_total}")
-    print(f"  Handled by MiniLM (BERT): {minilm_handled}")
-    print(f"  Handled by LLM: {llm_handled}")
+    print("\n[WORKLOAD FUNNEL] (final owner of each txn):")
+    print(f"  Handled by Regex          : {regex_handled}")
+    print(f"  Handled by Heuristics     : {heur_total}")
+    print(f"  Handled by MiniLM (BERT)  : {minilm_handled}")
+    print(f"  Handled by LLM            : {llm_handled}")
     print(f"  Final Unclassified/Pending: {pending_all}")
 
     # -----------------------------
-    print("\n[TEMPORAL FAILURE ANALYSIS]:")
-    for row in pending_by_month:
-        print(f"  {row['month_start'].strftime('%Y-%m')}: {row['pending_count']} pending")
+    print("\n[TEMPORAL PENDING ANALYSIS]:")
+    if not pending_by_month:
+        print("  No PENDING/UNCLEAR transactions over time.")
+    else:
+        for row in pending_by_month:
+            month_label = row['month_start'].strftime('%Y-%m')
+            print(f"  {month_label}: {row['pending_count']} pending")
 
     # -----------------------------
     print("\n[QUALITY METRICS]:")
-    print(f"  Strong regex (conf ≥ 0.8): {regex_strong}")
-    print(f"  Strong MiniLM (conf ≥ 0.6): {bert_strong}")
-    print(f"  Strong LLM (conf ≥ 0.9): {llm_strong}")
-    print(f"  Total PENDING after ALL stages: {pending_all}")
+    print(f"  Strong regex (conf ≥ 0.8)         : {regex_strong}")
+    print(f"  Regex still PENDING               : {regex_failed}")
+
+    print(f"\n  Heuristics total                  : {heur_total}")
+    print(f"  Strong heuristics (conf ≥ 0.65)    : {heur_strong}")
+    print(f"  Heuristics still PENDING          : {heur_failed}")
+
+    print(f"\n  Strong MiniLM (conf ≥ 0.7)        : {bert_strong}")
+
+    print(f"\n  Strong LLM (conf ≥ 0.9)           : {llm_strong}")
+    print(f"  LLM low confidence (< 0.8)        : {llm_low_conf}")
+
+    print(f"\n  Total PENDING after ALL stages    : {pending_all}")
     print("===============================================\n")
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
