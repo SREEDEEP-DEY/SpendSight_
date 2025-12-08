@@ -17,53 +17,45 @@ def save_dashboard_snapshot(
     end_date: Optional[date] = None,
 ) -> str:
     """
-    Build dashboard JSON via get_dashboard_data(...) and store it in `reports`.
+    Generate dashboard data for a user + period and upsert it into reports.summary_json.
 
-    - period: label like '2023-06', '2023-Q3', '2023-04_to_2024-03'
-    - If (user_id, period, 'dashboard_snapshot') exists, it is UPDATED.
-    Returns the report_id (UUID as string).
+    - summary_json: full dashboard_data payload
+    - insights: left NULL here (can be filled later by LLM)
+    - file_path: NULL (we are not storing PNGs anymore)
     """
-    dashboard_json = get_dashboard_data(
-        user_id=user_id,
-        start_date=start_date,
-        end_date=end_date,
-    )
-
     conn = get_db_connection()
     try:
+        snapshot: Dict[str, Any] = get_dashboard_data(
+            user_id=user_id,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO reports (
-                    user_id,
-                    period,
-                    report_type,
-                    summary_json,
-                    insights,
-                    file_path
-                )
-                VALUES (
-                    %s,
-                    %s,
-                    'dashboard_snapshot',
-                    %s::jsonb,
-                    NULL,
-                    NULL
-                )
-                ON CONFLICT (user_id, period, report_type)
-                DO UPDATE SET
-                    summary_json = EXCLUDED.summary_json,
-                    updated_at   = NOW()
+                INSERT INTO reports (user_id, period, summary_json, insights, file_path)
+                VALUES (%s, %s, %s::jsonb, %s, %s)
+                ON CONFLICT (user_id, period) DO UPDATE
+                SET summary_json = EXCLUDED.summary_json,
+                    insights     = EXCLUDED.insights,
+                    file_path    = EXCLUDED.file_path
                 RETURNING report_id;
                 """,
-                (user_id, period, json.dumps(dashboard_json)),
+                (
+                    user_id,
+                    period,
+                    json.dumps(snapshot),
+                    None,   # insights placeholder
+                    None,   # file_path placeholder
+                ),
             )
             report_id = cur.fetchone()[0]
+
         conn.commit()
         return str(report_id)
     finally:
         conn.close()
-
 
 # --------------------------------------------------
 # 2) READ snapshots for the Dashboard tab
