@@ -8,6 +8,9 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET")
+print("SUPABASE_URL =", SUPABASE_URL)
+print("SUPABASE_BUCKET_NAME =", SUPABASE_BUCKET)
+print("SUPABASE_SERVICE_ROLE_KEY exists =", SUPABASE_KEY is not None)
 
 def upload_pdf_to_supabase(pdf_bytes: bytes, filename: str) -> str:
     """Upload PDF to Supabase Storage and return public URL"""
@@ -27,3 +30,4 @@ def upload_pdf_to_supabase(pdf_bytes: bytes, filename: str) -> str:
         return public_url
     else:
         raise Exception(f"Supabase upload failed: {response.text}")
+    

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()  # loads .env into environment
 
-DATABASE_URL = os.getenv("SUPABASE_DB_URL")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
     raise RuntimeError("SUPABASE_DB_URL is not set in environment variables")
