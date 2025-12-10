@@ -250,7 +250,7 @@ SpendSight is designed with financial-grade constraints:
 
 * Parsing & Classification Pipeline — Shreyan Ghosh & Sreedeep Dey.
 * OCR Subsystem and RAG— Sambhranta Ghosh.
-* Dashboard — Sreedeep Dey.
+* Dashboard & Report Generation — Shreyan Ghosh.
 * Architecture & Integration — Shreyan Ghosh & Arka Ghosh.
 
 ---
