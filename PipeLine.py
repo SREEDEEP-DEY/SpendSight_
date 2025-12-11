@@ -7,6 +7,8 @@ import uuid
 import psycopg2
 from psycopg2 import extras
 from dotenv import load_dotenv
+from typing import List, Dict, Tuple, Any, Optional
+import pdfplumber
 
 # Day 3: Regex engine
 from regex_engine.regex_classifier import classify_with_regex
@@ -118,9 +120,9 @@ def parse_statement(filepath):
             return "SBI", parse_sbi(pdf, filepath)
         if "federal bank" in first:
             return "Federal Bank", parse_federal_bank(pdf, filepath)
-        if "ICICI Bank" in first:
+        if "icici" in first:
             return "ICICI Bank", parse_icici(pdf, filepath)
-        if "IDBI Bank" in first:
+        if "idbi" in first:
             return "IDBI Bank", parse_idbi(pdf, filepath)
 
         # # OCR / generic
@@ -134,6 +136,132 @@ def parse_statement(filepath):
         #     return "GENERIC_OCR", txns
 
         return None, []
+
+# import inspect
+
+# def call_parser(func, filepath, full_text=None):
+#     """
+#     Safely call any parser regardless of whether it accepts:
+#       - (pdf, filepath)
+#       - (filepath)
+#       - (text=...)
+#     """
+#     sig = inspect.signature(func)
+#     params = list(sig.parameters.values())
+
+#     try:
+#         if len(params) == 2:
+#             # Old style: (pdf, filepath)
+#             with pdfplumber.open(filepath) as pdf:
+#                 return func(pdf, filepath)
+
+#         elif len(params) == 1:
+#             # New style: (filepath)
+#             return func(filepath)
+
+#         else:
+#             # Text-based OCR style: parse_ocr_generic(text=...)
+#             if "text" in sig.parameters:
+#                 return func(text=full_text)
+#             if "filepath" in sig.parameters:
+#                 return func(filepath=filepath)
+
+#         # fallback
+#         return func(filepath)
+
+#     except Exception as e:
+#         print(f"[ParserAdapter] Error calling {func.__name__}: {e}")
+#         return []
+
+# def parse_statement(filepath):
+#     """
+#     Detect bank format and route to the appropriate parser.
+#     Returns (bank_name_or_tag, list_of_raw_txns)
+
+#     NOTE: we avoid passing the pdfplumber PDF object to parsers because the
+#     object is closed at the end of the 'with' block — instead pass filepath or
+#     the extracted text to parsers (safer across processes).
+#     """
+#     import pdfplumber
+#     from pathlib import Path
+#     import logging
+
+#     logger = logging.getLogger("PipeLine.parse_statement")
+#     filename = Path(filepath).name.lower()
+
+#     # Extract page-level text and full-text while the file handle is open
+#     first = ""
+#     full_text_str = ""
+#     try:
+#         with pdfplumber.open(filepath) as pdf:
+#             if pdf.pages:
+#                 first = (pdf.pages[0].extract_text() or "").strip().lower()
+#             # build full text
+#             pages_text = []
+#             for p in pdf.pages:
+#                 pages_text.append(p.extract_text() or "")
+#             full_text_str = "\n".join(pages_text).strip().lower()
+#     except Exception as e:
+#         logger.exception("Failed to open/extract text from PDF %s: %s", filepath, e)
+#         # If we couldn't open PDF, attempt to fall back to passing the filepath to parsers
+#         first = ""
+#         full_text_str = ""
+
+#     logger.info("Parsing file=%s (first_page_preview=%s...)", filepath, first[:120].replace("\n", " "))
+
+#     # small helper
+#     def has_any(hay: str, needles):
+#         if not hay:
+#             return False
+#         for n in needles:
+#             if n and n in hay:
+#                 return True
+#         return False
+
+#     # Primary detection using first page + filename
+
+#     # Bank of Baroda / BOB
+#     # BOB
+#     if has_any(first, ["bank of baroda", "statement of account"]):
+#         return "BOB", call_parser(parse_bob, filepath)
+
+#     # PNB
+#     if "punjab national bank" in first or "pnb" in filename:
+#         return "PNB", call_parser(parse_pnb, filepath)
+
+#     # SBI
+#     if has_any(first, ["state bank of india", "sbi"]):
+#         return "SBI", call_parser(parse_sbi, filepath)
+
+#     # Federal
+#     if "federal bank" in first:
+#         return "Federal Bank", call_parser(parse_federal_bank, filepath)
+
+#     # ICICI
+#     if has_any(first, ["icici bank", "icici"]):
+#         return "ICICI Bank", call_parser(parse_icici, filepath)
+
+#     # IDBI
+#     if has_any(first, ["idbi bank", "idbi"]):
+#         return "IDBI Bank", call_parser(parse_idbi, filepath)
+
+#     # OCR-generic
+#     if "_ocr_" in filename or "ocr" in filename:
+#         return "GENERIC_OCR", call_parser(parse_ocr_generic, filepath, full_text_str)
+
+    
+
+#     # Final fallback: if full_text_str has table-like content, try generic parser
+#     if full_text_str:
+#         try:
+#             txns = call_parser(parse_ocr_generic,filepath,full_text_str)
+#             if txns:
+#                 return "GENERIC_OCR", txns
+#         except Exception:
+#             logger.debug("Fallback generic parser failed for %s", filepath, exc_info=True)
+
+#     logger.warning("Could not detect bank for file=%s; returning (None, [])", filepath)
+#     return None, []
 
 # --------------------------------------------------------
 # NORMALIZATION
@@ -170,6 +298,98 @@ def _try_parse_date(s: str):
             return datetime.strptime(s, fmt).date()
         except ValueError:
             continue
+    return None
+# --- add near the top of PipeLine.py (imports area) ---
+from datetime import datetime, date
+try:
+    # dateutil is very forgiving with varied date formats
+    from dateutil.parser import parse as _dateutil_parse
+    _HAS_DATEUTIL = True
+except Exception:
+    _HAS_DATEUTIL = False
+
+import re
+
+# -------------------------
+# parse_date helper
+# -------------------------
+def parse_date(s: str) -> Optional[date]:
+    """
+    Parse a date-like string from bank statements into a datetime.date.
+    Returns None if parsing fails.
+
+    Handles:
+      - common textual dates (e.g., 12-Jan-2023, 12/01/23, 2023-01-12)
+      - formats like '12 JAN' (assume current year)
+      - ddmmyyyy or ddmmyy numeric forms
+    """
+    if not s:
+        return None
+    s = str(s).strip()
+    # quick numeric cleanup
+    s = re.sub(r'[^\w\-/\. ]', ' ', s)  # remove stray symbols except separators
+    s = re.sub(r'\s+', ' ', s).strip()
+
+    # Try dateutil first (if available)
+    if _HAS_DATEUTIL:
+        try:
+            dt = _dateutil_parse(s, dayfirst=True, fuzzy=True)
+            return dt.date()
+        except Exception:
+            pass
+
+    # Manual heuristics (fallback)
+    # 1) dd-mm-yyyy or dd/mm/yyyy or dd.mm.yyyy
+    m = re.match(r'(\d{1,2})[\/\-. ](\d{1,2})[\/\-. ](\d{2,4})$', s)
+    if m:
+        d, mth, y = m.groups()
+        d = int(d); mth = int(mth); y = int(y)
+        if y < 100:  # two-digit year
+            y += 2000 if y < 70 else 1900
+        try:
+            return date(y, mth, d)
+        except Exception:
+            pass
+
+    # 2) y-m-d or yyyy-mm-dd
+    m = re.match(r'(\d{4})[\/\-. ](\d{1,2})[\/\-. ](\d{1,2})$', s)
+    if m:
+        y, mth, d = map(int, m.groups())
+        try:
+            return date(y, mth, d)
+        except Exception:
+            pass
+
+    # 3) ddMonyyyy or ddMonyy e.g., 12JAN2023 or 12JAN23
+    m = re.match(r'(\d{1,2})\s*([A-Za-z]{3,})\s*(\d{2,4})?$', s)
+    if m:
+        d = int(m.group(1))
+        mon = m.group(2)[:3].title()
+        y = m.group(3)
+        try:
+            y = int(y) if y else datetime.now().year
+            if y < 100:
+                y += 2000 if y < 70 else 1900
+            dt = datetime.strptime(f"{d} {mon} {y}", "%d %b %Y")
+            return dt.date()
+        except Exception:
+            pass
+
+    # 4) plain 6/8 digit numeric like 120120 or 12012020
+    m = re.match(r'^(\d{6,8})$', s)
+    if m:
+        digits = m.group(1)
+        if len(digits) == 6:  # ddmmyy
+            d = int(digits[0:2]); mth = int(digits[2:4]); y = int(digits[4:6])
+            y += 2000 if y < 70 else 1900
+        else:  # 8 digits ddmmyyyy
+            d = int(digits[0:2]); mth = int(digits[2:4]); y = int(digits[4:8])
+        try:
+            return date(y, mth, d)
+        except Exception:
+            pass
+
+    # If all fail, return None
     return None
 
 

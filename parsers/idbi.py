@@ -44,17 +44,17 @@ def parse_idbi(pdf, filepath):
                 else:
                     credit = amt
 
-                txns.append({
+                txns.append(
+                    {
                     "bank": "IDBI",
-                    "date": date,
-                    "time": time,
-                    "value_date": value_date,
-                    "description": desc.strip(),
-                    "debit": debit,
-                    "credit": credit,
+                    "date": date,  # use first date as txn date
+                    "description": desc,
+                    "debit": clean_amount_if_needed(debit) if debit else 0.0,
+                    "credit": clean_amount_if_needed(credit) if credit else 0.0,
                     "balance": clean_amount_if_needed(balance),
-                    "category": None
-                })
+                    "category": None,
+                }
+                )
 
     print(f"[SUCCESS] Parsed {len(txns)} transactions from {filepath}.")
     return txns

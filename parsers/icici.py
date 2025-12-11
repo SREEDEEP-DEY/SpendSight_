@@ -39,10 +39,10 @@ def parse_icici(pdf, filepath):
                 current = {
                     "bank": "ICICI",
                     "date": gd["date"],
-                    "mode": gd["mode"].strip(),
                     "description": gd["particulars"].strip(),
-                    "credit": clean_amount_if_needed(gd["deposit"]),
+                    
                     "debit": clean_amount_if_needed(gd["withdrawal"]),
+                    "credit": clean_amount_if_needed(gd["deposit"]),
                     "balance": clean_amount_if_needed(gd["balance"]),
                     "category": None,
                 }
