@@ -116,8 +116,8 @@ def parse_statement(filepath):
             return "BOB", parse_bob(pdf, filepath)
         if "punjab national bank" in first:
             return "PNB", parse_pnb(pdf, filepath)
-        if "state bank of india" in first or "sbi" in first:
-            return "SBI", parse_sbi(pdf, filepath)
+        # if "state bank of india" in first or "sbi" in first:
+        #     return "SBI", parse_sbi(pdf, filepath)
         if "federal bank" in first:
             return "Federal Bank", parse_federal_bank(pdf, filepath)
         if "icici" in first:
