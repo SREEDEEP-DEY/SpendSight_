@@ -2,13 +2,22 @@ import os
 import sys
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
+from decimal import Decimal  # ADD THIS IMPORT - it's missing!
 import uuid
 import psycopg2
 from psycopg2 import extras
 from dotenv import load_dotenv
 from typing import List, Dict, Tuple, Any, Optional
 import pdfplumber
+import re
+
+# dateutil for flexible date parsing
+try:
+    from dateutil.parser import parse as _dateutil_parse
+    _HAS_DATEUTIL = True
+except Exception:
+    _HAS_DATEUTIL = False
 
 # Day 3: Regex engine
 from regex_engine.regex_classifier import classify_with_regex
@@ -60,6 +69,10 @@ def insert_transactions(conn, transactions):
 
 
 def insert_classification_log(conn, txn_id, stage, prediction, confidence, meta):
+    """
+    Insert a single classification log entry.
+    Note: No 'created_at' column - relies on DB default timestamp.
+    """
     q = """
     INSERT INTO classification_log (txn_id, stage, prediction, confidence, meta)
     VALUES (%s, %s, %s, %s, %s::jsonb)
@@ -104,20 +117,19 @@ def update_document_status(conn, doc_id, status):
 # --------------------------------------------------------
 
 def parse_statement(filepath):
-    import pdfplumber
-    from pathlib import Path
-
+    """
+    Detect bank format and route to the appropriate parser.
+    Returns (bank_name, list_of_raw_txns)
+    """
     with pdfplumber.open(filepath) as pdf:
         first = (pdf.pages[0].extract_text() or "").lower()
         filename = Path(filepath).name.lower()
 
-        # known banks...
+        # Known banks
         if "bank of baroda" in first or "statement of account" in first:
             return "BOB", parse_bob(pdf, filepath)
         if "punjab national bank" in first:
             return "PNB", parse_pnb(pdf, filepath)
-        # if "state bank of india" in first or "sbi" in first:
-        #     return "SBI", parse_sbi(pdf, filepath)
         if "federal bank" in first:
             return "Federal Bank", parse_federal_bank(pdf, filepath)
         if "icici" in first:
@@ -125,208 +137,21 @@ def parse_statement(filepath):
         if "idbi" in first:
             return "IDBI Bank", parse_idbi(pdf, filepath)
 
-        # # OCR / generic
-        # if "_ocr_" in filename or "spendsight ocr" in first:
-        #     txns = parse_ocr_generic(text=)
-        #     return "GENERIC_OCR", txns
-
-        # # final fallback
-        # txns = parse_ocr_generic()
-        # if txns:
-        #     return "GENERIC_OCR", txns
-
         return None, []
 
-# import inspect
-
-# def call_parser(func, filepath, full_text=None):
-#     """
-#     Safely call any parser regardless of whether it accepts:
-#       - (pdf, filepath)
-#       - (filepath)
-#       - (text=...)
-#     """
-#     sig = inspect.signature(func)
-#     params = list(sig.parameters.values())
-
-#     try:
-#         if len(params) == 2:
-#             # Old style: (pdf, filepath)
-#             with pdfplumber.open(filepath) as pdf:
-#                 return func(pdf, filepath)
-
-#         elif len(params) == 1:
-#             # New style: (filepath)
-#             return func(filepath)
-
-#         else:
-#             # Text-based OCR style: parse_ocr_generic(text=...)
-#             if "text" in sig.parameters:
-#                 return func(text=full_text)
-#             if "filepath" in sig.parameters:
-#                 return func(filepath=filepath)
-
-#         # fallback
-#         return func(filepath)
-
-#     except Exception as e:
-#         print(f"[ParserAdapter] Error calling {func.__name__}: {e}")
-#         return []
-
-# def parse_statement(filepath):
-#     """
-#     Detect bank format and route to the appropriate parser.
-#     Returns (bank_name_or_tag, list_of_raw_txns)
-
-#     NOTE: we avoid passing the pdfplumber PDF object to parsers because the
-#     object is closed at the end of the 'with' block — instead pass filepath or
-#     the extracted text to parsers (safer across processes).
-#     """
-#     import pdfplumber
-#     from pathlib import Path
-#     import logging
-
-#     logger = logging.getLogger("PipeLine.parse_statement")
-#     filename = Path(filepath).name.lower()
-
-#     # Extract page-level text and full-text while the file handle is open
-#     first = ""
-#     full_text_str = ""
-#     try:
-#         with pdfplumber.open(filepath) as pdf:
-#             if pdf.pages:
-#                 first = (pdf.pages[0].extract_text() or "").strip().lower()
-#             # build full text
-#             pages_text = []
-#             for p in pdf.pages:
-#                 pages_text.append(p.extract_text() or "")
-#             full_text_str = "\n".join(pages_text).strip().lower()
-#     except Exception as e:
-#         logger.exception("Failed to open/extract text from PDF %s: %s", filepath, e)
-#         # If we couldn't open PDF, attempt to fall back to passing the filepath to parsers
-#         first = ""
-#         full_text_str = ""
-
-#     logger.info("Parsing file=%s (first_page_preview=%s...)", filepath, first[:120].replace("\n", " "))
-
-#     # small helper
-#     def has_any(hay: str, needles):
-#         if not hay:
-#             return False
-#         for n in needles:
-#             if n and n in hay:
-#                 return True
-#         return False
-
-#     # Primary detection using first page + filename
-
-#     # Bank of Baroda / BOB
-#     # BOB
-#     if has_any(first, ["bank of baroda", "statement of account"]):
-#         return "BOB", call_parser(parse_bob, filepath)
-
-#     # PNB
-#     if "punjab national bank" in first or "pnb" in filename:
-#         return "PNB", call_parser(parse_pnb, filepath)
-
-#     # SBI
-#     if has_any(first, ["state bank of india", "sbi"]):
-#         return "SBI", call_parser(parse_sbi, filepath)
-
-#     # Federal
-#     if "federal bank" in first:
-#         return "Federal Bank", call_parser(parse_federal_bank, filepath)
-
-#     # ICICI
-#     if has_any(first, ["icici bank", "icici"]):
-#         return "ICICI Bank", call_parser(parse_icici, filepath)
-
-#     # IDBI
-#     if has_any(first, ["idbi bank", "idbi"]):
-#         return "IDBI Bank", call_parser(parse_idbi, filepath)
-
-#     # OCR-generic
-#     if "_ocr_" in filename or "ocr" in filename:
-#         return "GENERIC_OCR", call_parser(parse_ocr_generic, filepath, full_text_str)
-
-    
-
-#     # Final fallback: if full_text_str has table-like content, try generic parser
-#     if full_text_str:
-#         try:
-#             txns = call_parser(parse_ocr_generic,filepath,full_text_str)
-#             if txns:
-#                 return "GENERIC_OCR", txns
-#         except Exception:
-#             logger.debug("Fallback generic parser failed for %s", filepath, exc_info=True)
-
-#     logger.warning("Could not detect bank for file=%s; returning (None, [])", filepath)
-#     return None, []
-
 # --------------------------------------------------------
-# NORMALIZATION
+# DATE PARSING
 # --------------------------------------------------------
 
-def clean_amount(v):
-    if not v:
-        return 0.0
-    s = str(v).replace(",", "").replace(" ", "")
-    if s.startswith("(") and s.endswith(")"):
-        s = "-" + s[1:-1]
-    try:
-        return float(s)
-    except:
-        return 0.0
-
-
-
-DATE_PATTERNS = [
-    # 12-06-2023, 12/06/2023, 12.06.2023
-    r"(?P<date>\d{1,2}[-/\.]\d{1,2}[-/\.]\d{2,4})",
-    # 2023-06-12
-    r"(?P<date>\d{4}[-/\.]\d{1,2}[-/\.]\d{1,2})",
-]
-
-AMOUNT_PATTERN = r"(?P<amount>[+-]?\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)"
-
-
-def _try_parse_date(s: str):
-    s = s.strip()
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y",
-                "%d-%m-%y", "%d/%m/%y", "%Y-%m-%d", "%Y/%m/%d"):
-        try:
-            return datetime.strptime(s, fmt).date()
-        except ValueError:
-            continue
-    return None
-# --- add near the top of PipeLine.py (imports area) ---
-from datetime import datetime, date
-try:
-    # dateutil is very forgiving with varied date formats
-    from dateutil.parser import parse as _dateutil_parse
-    _HAS_DATEUTIL = True
-except Exception:
-    _HAS_DATEUTIL = False
-
-import re
-
-# -------------------------
-# parse_date helper
-# -------------------------
 def parse_date(s: str) -> Optional[date]:
     """
     Parse a date-like string from bank statements into a datetime.date.
     Returns None if parsing fails.
-
-    Handles:
-      - common textual dates (e.g., 12-Jan-2023, 12/01/23, 2023-01-12)
-      - formats like '12 JAN' (assume current year)
-      - ddmmyyyy or ddmmyy numeric forms
     """
     if not s:
         return None
     s = str(s).strip()
-    # quick numeric cleanup
+    # Quick numeric cleanup
     s = re.sub(r'[^\w\-/\. ]', ' ', s)  # remove stray symbols except separators
     s = re.sub(r'\s+', ' ', s).strip()
 
@@ -351,7 +176,7 @@ def parse_date(s: str) -> Optional[date]:
         except Exception:
             pass
 
-    # 2) y-m-d or yyyy-mm-dd
+    # 2) yyyy-mm-dd
     m = re.match(r'(\d{4})[\/\-. ](\d{1,2})[\/\-. ](\d{1,2})$', s)
     if m:
         y, mth, d = map(int, m.groups())
@@ -375,7 +200,7 @@ def parse_date(s: str) -> Optional[date]:
         except Exception:
             pass
 
-    # 4) plain 6/8 digit numeric like 120120 or 12012020
+    # 4) Plain 6/8 digit numeric like 120120 or 12012020
     m = re.match(r'^(\d{6,8})$', s)
     if m:
         digits = m.group(1)
@@ -389,20 +214,33 @@ def parse_date(s: str) -> Optional[date]:
         except Exception:
             pass
 
-    # If all fail, return None
     return None
+
+# --------------------------------------------------------
+# AMOUNT NORMALIZATION
+# --------------------------------------------------------
+
+def clean_amount(v):
+    """Convert various amount formats to float."""
+    if not v:
+        return 0.0
+    s = str(v).replace(",", "").replace(" ", "")
+    if s.startswith("(") and s.endswith(")"):
+        s = "-" + s[1:-1]
+    try:
+        return float(s)
+    except:
+        return 0.0
 
 
 def normalize_txn(tx, statement_id, user_id):
     """
     Normalize a raw parsed transaction into the canonical schema.
-
-    - Tries 'amount' first (to preserve existing behaviour if it works)
-    - If that is zero / empty, falls back to typical debit/credit fields
-    - Outflows (debits / withdrawals) are stored as NEGATIVE
-    - Inflows (credits / deposits / salary / interest) as POSITIVE
+    
+    Convention:
+      - Debits/withdrawals → NEGATIVE
+      - Credits/deposits → POSITIVE
     """
-
     raw_date = str(tx.get("date", "")).strip()
     if not raw_date or len(raw_date) < 4:
         return None
@@ -420,14 +258,11 @@ def normalize_txn(tx, statement_id, user_id):
 
     # If parser already gave a valid non-zero amount, trust it
     if amt != 0:
-        signed_amount = amt
+        signed_amount = Decimal(str(amt))
         amount_source = "amount"
     else:
-        # 2) Fallback: infer from typical debit / credit style fields
+        # 2) Fallback: infer from typical debit/credit style fields
         signed_amount, amount_source = _infer_amount_from_raw_fields(tx)
-
-    # Optional: debug once in a while
-    # print("NORMALIZED TX:", desc[:60], "| raw:", tx, "| amt:", signed_amount, "| src:", amount_source)
 
     return {
         "user_id": user_id,
@@ -446,59 +281,41 @@ def normalize_txn(tx, statement_id, user_id):
 def _infer_amount_from_raw_fields(tx):
     """
     Try to derive a signed amount from common raw fields.
-
-    Convention:
-      - Debits / withdrawals -> NEGATIVE
-      - Credits / deposits / salary / interest -> POSITIVE
-
-    Returns:
-      (Decimal amount, source_key: str | None)
+    
+    Returns: (Decimal amount, source_key: str | None)
     """
-    # Helper to check a raw field is "non-empty"
     def _has_value(v):
         return v not in (None, "", "-", " ", "\u00a0")
 
-    # 1) Debit-like fields (money going OUT)
+    # 1) Debit-like fields (money going OUT → NEGATIVE)
     debit_keys = [
-        "debit",
-        "withdrawal",
-        "withdrawal_amount",
-        "debit_amount",
-        "dr_amount",
-        "dr",
+        "debit", "withdrawal", "withdrawal_amount",
+        "debit_amount", "dr_amount", "dr",
     ]
-
     for key in debit_keys:
         if _has_value(tx.get(key)):
-            raw = tx.get(key)
-            amt = clean_amount(raw)
+            amt = clean_amount(tx.get(key))
             try:
                 amt = abs(amt)
             except Exception:
-                amt = Decimal("0.00")
-            return -amt, key  # store as NEGATIVE
+                amt = 0.0
+            return Decimal(str(-amt)), key
 
-    # 2) Credit-like fields (money coming IN)
+    # 2) Credit-like fields (money coming IN → POSITIVE)
     credit_keys = [
-        "credit",
-        "deposit",
-        "deposit_amount",
-        "credit_amount",
-        "cr_amount",
-        "cr",
+        "credit", "deposit", "deposit_amount",
+        "credit_amount", "cr_amount", "cr",
     ]
-
     for key in credit_keys:
         if _has_value(tx.get(key)):
-            raw = tx.get(key)
-            amt = clean_amount(raw)
+            amt = clean_amount(tx.get(key))
             try:
                 amt = abs(amt)
             except Exception:
-                amt = Decimal("0.00")
-            return amt, key  # store as POSITIVE
+                amt = 0.0
+            return Decimal(str(amt)), key
 
-    # 3) Absolute fallback: if *nothing* is present, return 0.00
+    # 3) Fallback: nothing present, return 0.00
     return Decimal("0.00"), None
 
 # --------------------------------------------------------
@@ -544,8 +361,8 @@ def process_pdf(conn, filepath, user_id):
         conn.commit()
 
         # INSERT INTO LOG
-        prediction = f"{category}.{subcategory}" if category else None
-        insert_classification_log(conn, txn_id, "regex", prediction, conf, meta)
+        prediction = f"{category}.{subcategory}" if subcategory else category
+        insert_classification_log(conn, txn_id, "regex", prediction, conf, meta or {})
 
     update_document_status(conn, doc_id, "parsed")
     return len(txn_ids)

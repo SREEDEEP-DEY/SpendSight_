@@ -52,7 +52,7 @@ from llm.llm_classifier import llm_clf
 # ---------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------
-MAX_WORKERS = int(os.getenv("UNIFIED_PIPELINE_MAX_WORKERS", min(4, (os.cpu_count() or 2))))
+MAX_WORKERS = int(os.getenv("UNIFIED_PIPELINE_MAX_WORKERS", min(8, (os.cpu_count() or 2))))
 LLM_BATCH_SIZE = int(os.getenv("UNIFIED_PIPELINE_LLM_BATCH_SIZE", 32))
 LLM_RETRY_MAX = int(os.getenv("UNIFIED_PIPELINE_LLM_RETRY_MAX", 3))
 LLM_BACKOFF_BASE = float(os.getenv("UNIFIED_PIPELINE_LLM_BACKOFF_BASE", 2.0))
@@ -60,9 +60,9 @@ LLM_BACKOFF_BASE = float(os.getenv("UNIFIED_PIPELINE_LLM_BACKOFF_BASE", 2.0))
 MINILM_LOW_CONF_THRESHOLD = float(os.getenv("MINILM_LOW_CONF_THRESHOLD", 0.50))
 LLM_FALLBACK_CONF_THRESHOLD = float(os.getenv("LLM_FALLBACK_CONF_THRESHOLD", 0.25))
 
-# bulk insert SQL (classification_logs). Adjust schema if different.
+# bulk insert SQL (classification_log). Adjust schema if different.
 BULK_INSERT_CLASSIFICATION_LOG_SQL = """
-INSERT INTO classification_logs (log_id, txn_id, source, prediction, confidence, meta, created_at)
+INSERT INTO classification_log (log_id, txn_id, prediction, confidence, meta, created_at)
 VALUES %s
 """
 
@@ -97,9 +97,9 @@ def llm_classify_with_retry(descriptions: List[str]) -> List[Tuple[str, Optional
 # Bulk insert classification logs helper (with fallback)
 # ---------------------------------------------------------------------
 
-# updated BULK SQL (add 'stage' column)
+# Updated BULK SQL (removed 'created_at' column)
 BULK_INSERT_CLASSIFICATION_LOG_SQL = """
-INSERT INTO classification_logs (log_id, txn_id, source, stage, prediction, confidence, meta, created_at)
+INSERT INTO classification_log (log_id, txn_id, stage, prediction, confidence, meta)
 VALUES %s
 """
 
@@ -107,27 +107,27 @@ def bulk_insert_classification_log(conn, logs: List[Dict[str, Any]]):
     """
     Bulk-insert classification logs using execute_values.
     Each log should be a dict with keys:
-      txn_id, source, stage (optional), prediction, confidence, meta (python dict)
+      txn_id, source (for stage fallback), stage (optional), prediction, confidence, meta (python dict)
     """
     if not logs:
         return
 
-    # Prepare tuples for execute_values: (txn_id, source, stage, prediction, confidence, meta_json)
+    # Prepare tuples for execute_values: (txn_id, stage, prediction, confidence, meta_json)
+    # NOTE: 'source' is NOT a column - it's only used as fallback for 'stage'
     tuples = []
     for log in logs:
-        stage = log.get("stage", log.get("source"))  # fallback to source if stage missing
+        stage = log.get("stage", log.get("source", "unknown"))  # fallback to source if stage missing
         meta_json = json.dumps(log.get("meta", {}))
         tuples.append((
             log["txn_id"],
-            log["source"],
-            stage,
+            stage,  # Only stage goes into DB
             log["prediction"],
             float(log.get("confidence", 0.0)),
             meta_json
         ))
 
-    # Template injects uuid_generate_v4() and NOW()
-    template = "(uuid_generate_v4(), %s, %s, %s, %s, %s::double precision, %s::jsonb, NOW())"
+    # Template: removed 'created_at' - only has log_id (auto-generated), txn_id, stage, prediction, confidence, meta
+    template = "(uuid_generate_v4(), %s, %s, %s, %s::double precision, %s::jsonb)"
 
     try:
         with conn.cursor() as cur:
@@ -136,21 +136,25 @@ def bulk_insert_classification_log(conn, logs: List[Dict[str, Any]]):
     except Exception as e:
         logger.warning("[bulk_insert] bulk insert failed: %s. Falling back to per-row insert.", e)
         conn.rollback()
+        
+        # Need to get a fresh connection after rollback for fallback inserts
         for log in logs:
             try:
+                # Rollback any pending transaction first
+                conn.rollback()
+                
                 # ensure we pass 'stage' to the single-row helper
                 insert_classification_log(
                     conn,
                     txn_id=log["txn_id"],
-                    
-                    stage=log.get("stage", log.get("source")),
+                    stage=log.get("stage", log.get("source", "unknown")),
                     prediction=log["prediction"],
                     confidence=float(log.get("confidence", 0.0)),
                     meta=log.get("meta", {})
                 )
-            except Exception:
-                logger.exception("[bulk_insert] fallback failed for txn_id=%s", log.get("txn_id"))
-
+            except Exception as fallback_error:
+                logger.exception("[bulk_insert] fallback failed for txn_id=%s: %s", 
+                               log.get("txn_id"), fallback_error)
 # ---------------------------------------------------------------------
 # DB helpers used inside workers
 # ---------------------------------------------------------------------
@@ -205,7 +209,7 @@ def apply_minilm_to_txn_worker(conn, txn):
     """
     Uses classify_single from nlp.miniLM_classifier which lazily loads the model
     inside the worker process. Updates DB and inserts a per-row log (the row-log
-    will still be included in the classification_logs bulk list where applicable).
+    will still be included in the classification_log bulk list where applicable).
     """
     try:
         desc = txn.get("description_clean") or txn.get("description_raw") or ""
@@ -270,11 +274,64 @@ def worker_process_file(args: Tuple[str, str]) -> Tuple[str, Dict[str, Any]]:
         conn = get_db_connection()
         original_filename = os.path.basename(filepath)
 
-        # Idempotency: skip already-processed files but run low-conf passes
+        # Idempotency: skip already-processed files but run ALL classifiers on low-conf/pending
         exists, existing_statement_id = statement_exists(conn, user_id, original_filename)
         if exists and existing_statement_id:
-            logger.info("[Worker] already processed: %s, running only low-conf classifiers", original_filename)
-            # MiniLM pass
+            logger.info("[Worker] already processed: %s, re-running all classifiers on pending/low-conf", original_filename)
+            
+            # REGEX pass on PENDING transactions
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT txn_id, description_raw
+                    FROM transactions
+                    WHERE statement_id = %s
+                      AND (category IS NULL OR category = 'PENDING')
+                """, (existing_statement_id,))
+                pending_regex = cur.fetchall()
+            
+            metrics["regex_attempted"] = len(pending_regex)
+            for txn in pending_regex:
+                desc = txn.get("description_raw") or ""
+                category, subcat, vendor, conf, meta = classify_with_regex(desc)
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE transactions
+                        SET vendor=%s, category=%s, subcategory=%s, confidence=%s, classification_source='regex'
+                        WHERE txn_id=%s
+                    """, (vendor, category, subcat, conf, txn["txn_id"]))
+                prediction = f"{category}.{subcat}" if subcat else category
+                insert_classification_log(conn, txn["txn_id"], "regex", prediction, conf, meta or {})
+                if category != "PENDING":
+                    metrics["regex_classified"] += 1
+            conn.commit()
+            
+            # HEURISTICS pass on still-pending
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute("""
+                    SELECT txn_id, description_clean, description_raw
+                    FROM transactions
+                    WHERE statement_id = %s
+                      AND (category IS NULL OR category = 'PENDING')
+                """, (existing_statement_id,))
+                pending_heur = cur.fetchall()
+            
+            metrics["heur_attempted"] = len(pending_heur)
+            for txn in pending_heur:
+                desc = txn["description_clean"] or txn["description_raw"] or ""
+                cat, sub, conf, meta = classify_with_heuristics(desc)
+                if cat != "PENDING":
+                    metrics["heur_classified"] += 1
+                    with conn.cursor() as cur_update:
+                        cur_update.execute("""
+                            UPDATE transactions
+                            SET category=%s, subcategory=%s, confidence=%s, classification_source='heuristic'
+                            WHERE txn_id=%s
+                        """, (cat, sub, conf, txn["txn_id"]))
+                    prediction = f"{cat}.{sub}" if sub else cat
+                    insert_classification_log(conn, txn["txn_id"], "heuristic", prediction, conf, meta or {})
+            conn.commit()
+            
+            # MiniLM pass on low-conf
             pending_bert = fetch_transactions_for_minilm(conn, existing_statement_id)
             metrics["mini_attempted"] = len(pending_bert)
             for txn in pending_bert:
@@ -283,7 +340,8 @@ def worker_process_file(args: Tuple[str, str]) -> Tuple[str, Dict[str, Any]]:
                     metrics["mini_pending"] += 1
                 else:
                     metrics["mini_classified"] += 1
-            # LLM pass
+            
+            # LLM pass on remaining low-conf
             llm_pending = fetch_transactions_for_llm(conn, existing_statement_id)
             metrics["llm_attempted"] = len(llm_pending)
             if llm_pending:
@@ -301,10 +359,12 @@ def worker_process_file(args: Tuple[str, str]) -> Tuple[str, Dict[str, Any]]:
                             SET category=%s, subcategory=%s, confidence=%s, classification_source='llm'
                             WHERE txn_id=%s
                         """, (category, subcategory, confidence, txn["txn_id"]))
-                    insert_classification_log(conn, txn["txn_id"], "llm", f"{category}.{subcategory}" if subcategory else category, confidence, meta or {})
+                    prediction = f"{category}.{subcategory}" if subcategory else category
+                    insert_classification_log(conn, txn["txn_id"], "llm", prediction, confidence, meta or {})
                     if category and category not in ("PENDING", "UNCLEAR"):
                         metrics["llm_classified"] += 1
                 conn.commit()
+            
             metrics["timings"]["total_s"] = time.time() - start_time
             return filepath, metrics
 
@@ -340,7 +400,7 @@ def worker_process_file(args: Tuple[str, str]) -> Tuple[str, Dict[str, Any]]:
         metrics["timings"]["insert_txns_s"] = time.time() - t0
 
         # Prepare log collector
-        classification_logs: List[Dict[str, Any]] = []
+        classification_log: List[Dict[str, Any]] = []
 
         # Step 5: Regex classification
         t0 = time.time()
@@ -358,9 +418,9 @@ def worker_process_file(args: Tuple[str, str]) -> Tuple[str, Dict[str, Any]]:
                     WHERE txn_id=%s
                 """, (vendor, category, subcat, conf, txn_id))
             prediction = f"{category}.{subcat}" if subcat else category
-            classification_logs.append({
+            classification_log.append({
                 "txn_id": txn_id,
-                "source": "regex",
+                "stage": "regex",
                 "prediction": prediction,
                 "confidence": conf,
                 "meta": meta or {}
@@ -397,9 +457,9 @@ def worker_process_file(args: Tuple[str, str]) -> Tuple[str, Dict[str, Any]]:
                         SET category=%s, subcategory=%s, confidence=%s, classification_source='heuristic'
                         WHERE txn_id=%s
                     """, (cat, sub, conf, txn["txn_id"]))
-                classification_logs.append({
+                classification_log.append({
                     "txn_id": txn["txn_id"],
-                    "source": "heuristic",
+                    "stage": "heuristic",
                     "prediction": f"{cat}.{sub}" if sub else cat,
                     "confidence": conf,
                     "meta": meta or {}
@@ -440,9 +500,9 @@ def worker_process_file(args: Tuple[str, str]) -> Tuple[str, Dict[str, Any]]:
                         SET category=%s, subcategory=%s, confidence=%s, classification_source='llm'
                         WHERE txn_id=%s
                     """, (category, subcategory, confidence, txn["txn_id"]))
-                classification_logs.append({
+                classification_log.append({
                     "txn_id": txn["txn_id"],
-                    "source": "llm",
+                    "stage": "llm",
                     "prediction": f"{category}.{subcategory}" if subcategory else category,
                     "confidence": confidence,
                     "meta": meta or {}
@@ -455,7 +515,7 @@ def worker_process_file(args: Tuple[str, str]) -> Tuple[str, Dict[str, Any]]:
         # Bulk insert collected logs (regex, heuristics, llm)
         t0 = time.time()
         try:
-            bulk_insert_classification_log(conn, classification_logs)
+            bulk_insert_classification_log(conn, classification_log)
             metrics["timings"]["bulk_logs_s"] = time.time() - t0
         except Exception:
             logger.exception("[Worker] bulk log insertion failed")
@@ -479,7 +539,6 @@ def worker_process_file(args: Tuple[str, str]) -> Tuple[str, Dict[str, Any]]:
                 conn.close()
         except Exception:
             pass
-
 # ---------------------------------------------------------------------
 # Main orchestration: parallel across files
 # ---------------------------------------------------------------------
