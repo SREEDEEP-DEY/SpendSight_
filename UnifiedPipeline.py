@@ -251,6 +251,8 @@ def apply_minilm_to_txn_worker(conn, txn):
 # ---------------------------------------------------------------------
 # Worker: full file processing
 # ---------------------------------------------------------------------
+
+
 def worker_process_file(args: Tuple[str, str]) -> Tuple[str, Dict[str, Any]]:
     filepath, user_id = args
     start_time = time.time()
